@@ -1,0 +1,1 @@
+This is a course scheduler for RPI. There is a hardcoded link for spring 2027 so if it's not that maybe update. Anyways quacs and shmacs were both terrible and this tool is actually good instead. Enjoy
