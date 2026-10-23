@@ -337,7 +337,7 @@ class Catalog:
 def render_list(cat: Catalog, plan, assign) -> Table:
     t = Table(box=box.SIMPLE_HEAD, pad_edge=False, header_style="bold")
     for col in ("Course", "Title", "Sec", "CRN", "Instructor", "Meetings", "Pin"):
-        t.add_column(col, overflow="fold")
+        t.add_column(col, no_wrap=True, overflow="truncate")
     credits = 0
     for i, (code, pin) in enumerate(plan.items()):
         color = PALETTE[i % len(PALETTE)]
@@ -434,6 +434,7 @@ class App:
     # flows ----------------------------------------------------------------
     def add(self):
         names = {pretty(c): self.cat.by_course[c][0].title for c in sorted(self.cat.by_course)}
+        # print(list(names))
         ans = questionary.autocomplete(
             "What course would you like to add (enter with no input to go back):",
             choices=list(names), meta_information=names, match_middle=True, ignore_case=True,
