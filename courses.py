@@ -39,7 +39,12 @@ DAYS = "MTWRFSU"
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 LIMIT = 20000  # stop enumerating after this many valid schedules
 PALETTE = ["#8ecae6", "#ffb703", "#b7e4c7", "#f4a6c0", "#cdb4db", "#ffd6a5", "#a0c4ff", "#fdffb6"]
-STYLE = Style([("disabled", "fg:#6c6c6c strike")])
+STYLE = Style([
+    ("disabled", "fg:#6c6c6c strike"),
+    ("answer", "fg:#000000 bg:#ffffff"),
+    ("completion-menu.completion", "fg:#000000 bg:#ffffff"),
+    ("completion-menu.completion.current", "fg:#ffffff bg:#444444"),
+])
 BACK = "__back__"
 CLEAR = "__clear__"
 console = Console()
@@ -240,35 +245,56 @@ class Catalog:
     def options(self, code: str, pin: str | None) -> list[Section]:
         return [s for s in self.by_course[code] if self.pickable(s) and (pin is None or s.crn == pin)]
 
-    def solve(self, plan: dict[str, str | None], limit: int = LIMIT):
-        """-> (best {course: Section} or None, number of valid schedules found)"""
+    @staticmethod
+    def time_signature(assignment: dict[str, Section]):
+        """Identify a schedule by each course's actual meeting days and times."""
+        return tuple(sorted(
+            (code, tuple(sorted((tuple(m.days), m.start, m.end) for m in section.meetings)))
+            for code, section in assignment.items()
+        ))
+
+    def solve_ranked(
+        self, plan: dict[str, str | None], limit: int = LIMIT,
+        allow_duplicate_times: bool = False,
+    ):
+        """Return schedules ordered best-to-worst, optionally collapsing identical timetables."""
         codes = list(plan)
         opts = {c: self.options(c, plan[c]) for c in codes}
         if any(not o for o in opts.values()):
-            return None, 0
+            return [], 0
         order = sorted(codes, key=lambda c: len(opts[c]))
         chosen: dict[str, Section] = {}
-        best, count = None, 0
+        schedules = []
+        seen_times = set()
 
         def rec(k: int):
-            nonlocal best, count
-            if count >= limit:
+            if len(schedules) >= limit:
                 return
             if k == len(order):
-                count += 1
-                sc = score(chosen.values())
-                if best is None or sc < best[0]:
-                    best = (sc, dict(chosen))
+                assignment = {c: chosen[c] for c in codes}
+                signature = self.time_signature(assignment)
+                if not allow_duplicate_times and signature in seen_times:
+                    return
+                seen_times.add(signature)
+                schedules.append((score(chosen.values()), assignment))
                 return
             c = order[k]
-            for s in opts[c]:
-                if all(not self.conflict(s, t) for t in chosen.values()):
-                    chosen[c] = s
+            for section in opts[c]:
+                if all(not self.conflict(section, other) for other in chosen.values()):
+                    chosen[c] = section
                     rec(k + 1)
                     del chosen[c]
+                    if len(schedules) >= limit:
+                        break
 
         rec(0)
-        return ({c: best[1][c] for c in codes} if best else None), count
+        schedules.sort(key=lambda item: (item[0], tuple(item[1][c].crn for c in codes)))
+        return [assignment for _, assignment in schedules], len(schedules)
+
+    def solve(self, plan: dict[str, str | None], limit: int = LIMIT):
+        """Return the best schedule and number of valid schedules found."""
+        schedules, count = self.solve_ranked(plan, limit)
+        return (schedules[0] if schedules else None), count
 
     def feasible(self, plan) -> bool:
         return self.solve(plan, 1)[0] is not None
@@ -365,6 +391,25 @@ class App:
         self.plan: dict[str, str | None] = {}
         self.dirty = False
         self.notice = ""
+        self.schedules: list[dict[str, Section]] = []
+        self.schedule_index = 0
+        self.allow_duplicate_times = False
+        self._schedule_key = None
+
+    def get_schedules(self):
+        key = (tuple(self.plan.items()), self.allow_duplicate_times)
+        if key != self._schedule_key:
+            self.schedules, _ = self.cat.solve_ranked(
+                self.plan, allow_duplicate_times=self.allow_duplicate_times
+            )
+            self._schedule_key = key
+            self.schedule_index = 0
+        return self.schedules
+
+    def cycle_schedule(self, delta: int):
+        schedules = self.get_schedules()
+        if schedules:
+            self.schedule_index = (self.schedule_index + delta) % len(schedules)
 
     # persistence ----------------------------------------------------------
     def load(self):
@@ -408,28 +453,57 @@ class App:
         if not self.plan:
             self.notice = "[yellow]Add a course first.[/]"
             return
-        code = questionary.select(
-            "Pin which course?", style=STYLE, qmark=">",
-            choices=[Choice(f"{pretty(c)}  {self.cat.by_course[c][0].title}" + (f"   (pinned: {p})" if p else ""), c)
-                     for c, p in self.plan.items()] + [Choice("back", BACK)],
-        ).ask()
-        if code in (None, BACK):
-            return
-        choices = []
-        for s in sorted(self.cat.by_course[code], key=lambda s: s.sec):
-            if not self.cat.pickable(s):
-                why = "full"
-            elif not self.cat.feasible({**self.plan, code: s.crn}):
-                why = "conflicts with your other courses"
-            else:
-                why = None
-            choices.append(Choice(describe(s), s.crn, disabled=why))
-        choices += [Choice("clear pin (let it auto-pick)", CLEAR), Choice("back", BACK)]
-        pick = questionary.select(f"Select a section of {pretty(code)} to pin:", choices=choices, style=STYLE, qmark=">").ask()
-        if pick in (None, BACK):
-            return
-        self.plan[code] = None if pick == CLEAR else pick
-        self.dirty = True
+
+        while True:
+            code = questionary.select(
+                "Pin which course?",
+                style=STYLE,
+                qmark=">",
+                choices=[
+                    Choice(
+                        f"{pretty(c)}  {self.cat.by_course[c][0].title}"
+                        + (f"   (pinned: {p})" if p else ""),
+                        c,
+                    )
+                    for c, p in self.plan.items()
+                ] + [Choice("back", BACK)],
+            ).ask()
+
+            if code in (None, BACK):
+                return
+
+            choices = []
+            for s in sorted(self.cat.by_course[code], key=lambda s: s.sec):
+                if not self.cat.pickable(s):
+                    why = "full"
+                elif not self.cat.feasible({**self.plan, code: s.crn}):
+                    why = "conflicts with your other courses"
+                else:
+                    why = None
+
+                choices.append(Choice(describe(s), s.crn, disabled=why))
+
+            choices += [
+                Choice("clear pin (let it auto-pick)", CLEAR),
+                Choice("back", BACK),
+            ]
+
+            pick = questionary.select(
+                f"Select a section of {pretty(code)} to pin:",
+                choices=choices,
+                style=STYLE,
+                qmark=">",
+            ).ask()
+
+            if pick is None:
+                return
+            if pick == BACK:
+                self.draw()
+                continue
+
+            self.plan[code] = None if pick == CLEAR else pick
+            self.dirty = True
+            self.draw()
 
     def remove(self):
         if not self.plan:
@@ -456,12 +530,14 @@ class App:
     # main loop ------------------------------------------------------------
     def draw(self):
         console.clear()
-        console.rule("[bold]RPI schedule builder")
-        console.print("[dim]Courses[/]")
+        # console.rule("[bold]RPI schedule builder")
+        # console.print("[dim]Courses[/]")
         if not self.plan:
             console.print("  (none yet)")
             return
-        assign, n = self.cat.solve(self.plan)
+        schedules = self.get_schedules()
+        assign = schedules[self.schedule_index] if schedules else None
+        n = len(schedules)
         console.print(render_list(self.cat, self.plan, assign))
         console.rule()
         if assign is None:
@@ -472,21 +548,117 @@ class App:
             grid = render_grid(assign)
             console.print(grid if grid else "[dim]All of these courses are TBA - nothing to draw.[/]")
             more = "+" if n >= LIMIT else ""
-            console.print(f"[dim]{n}{more} conflict-free combination(s); showing the one with the fewest days/gaps.[/]")
+            console.print(
+                f"[dim]Schedule {self.schedule_index + 1}/{n}{more}; ranked by fewest days, then smallest gaps. "
+                f"Duplicate meeting-time schedules are {'shown' if self.allow_duplicate_times else 'hidden'}; use ←/→ to cycle.[/]"
+            )
         console.rule()
 
     def run(self):
-        menu = [Choice("add a course", "add"), Choice("pin a course (pick a specific section)", "pin"),
-                Choice("remove a course", "remove"), Choice("quit", "quit")]
+        # Keep the original vertical menu; left/right change schedules without
+        # forcing the user to leave the menu.
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.styles import Style as PromptStyle
+
+        menu = [
+            ("add a course", "add"),
+            ("pin a course (pick a specific section)", "pin"),
+            ("remove a course", "remove"),
+            ("[ ] allow duplicate-time schedules", "duplicates"),
+            ("quit", "quit"),
+        ]
+        selected = 0
+        result = None
+
+        def menu_text():
+            rows = []
+            for i, (label, action) in enumerate(menu):
+                if action == "duplicates":
+                    label = f"[{'x' if self.allow_duplicate_times else ' '}] allow duplicate-time schedules"
+                # Match the old menu's minimal look: indicate selection with an
+                # arrow only, without a reverse-video/highlighted row.
+                prefix = "❯ " if i == selected else "  "
+                rows.append(("", prefix + label + "\n"))
+            rows.append(("class:hint", "\n  ↑/↓ select  ·  ←/→ cycle schedules  ·  Enter choose  ·  q quit\n"))
+            return rows
+
+        bindings = KeyBindings()
+
+        @bindings.add("up")
+        def _up(event):
+            nonlocal selected
+            selected = (selected - 1) % len(menu)
+            event.app.invalidate()
+
+        @bindings.add("down")
+        def _down(event):
+            nonlocal selected
+            selected = (selected + 1) % len(menu)
+            event.app.invalidate()
+
+        @bindings.add("left")
+        def _previous(event):
+            event.app.exit(result="previous")
+
+        @bindings.add("right")
+        def _next(event):
+            event.app.exit(result="next")
+
+        @bindings.add("enter")
+        def _choose(event):
+            event.app.exit(result=menu[selected][1])
+
+        @bindings.add("a")
+        def _add(event):
+            event.app.exit(result="add")
+
+        @bindings.add("p")
+        def _pin(event):
+            event.app.exit(result="pin")
+
+        @bindings.add("r")
+        def _remove(event):
+            event.app.exit(result="remove")
+
+        @bindings.add("q")
+        def _quit(event):
+            event.app.exit(result="quit")
+
         while True:
             self.draw()
             if self.notice:
                 console.print(self.notice)
                 self.notice = ""
-            act = questionary.select("", choices=menu, style=STYLE, qmark="").ask() or "quit"
+            app = Application(
+                layout=Layout(Window(FormattedTextControl(menu_text), always_hide_cursor=True)),
+                key_bindings=bindings,
+                style=PromptStyle.from_dict({
+                    "hint": "#888888",
+                }),
+                full_screen=False,
+                mouse_support=False,
+            )
+            try:
+                act = app.run()
+            except (EOFError, KeyboardInterrupt):
+                act = "quit"
+
             if act == "quit":
                 return self.quit()
-            getattr(self, act)()
+            if act == "previous":
+                self.cycle_schedule(-1)
+            elif act == "next":
+                self.cycle_schedule(1)
+            elif act == "duplicates":
+                self.allow_duplicate_times = not self.allow_duplicate_times
+                self._schedule_key = None
+            elif act in ("add", "pin", "remove"):
+                getattr(self, act)()
+                self._schedule_key = None
 
 
 def main():
