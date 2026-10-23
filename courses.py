@@ -338,6 +338,7 @@ def render_list(cat: Catalog, plan, assign) -> Table:
     t = Table(box=box.SIMPLE_HEAD, pad_edge=False, header_style="bold")
     for col in ("Course", "Title", "Sec", "CRN", "Instructor", "Meetings", "Pin"):
         t.add_column(col, overflow="fold")
+    credits = 0
     for i, (code, pin) in enumerate(plan.items()):
         color = PALETTE[i % len(PALETTE)]
         s = assign[code] if assign else None
@@ -346,6 +347,10 @@ def render_list(cat: Catalog, plan, assign) -> Table:
             s.sec if s else "-", s.crn if s else "-", (s.instructor or "-") if s else "-",
             meetings_str(s) if s else "-", "[b]pinned[/]" if pin else "",
         )
+        credits += int(s.credits or 0)
+
+    t.add_row(Text(pretty("Total Credit Hours: {}".format(credits)), 
+                   style=f"bold {PALETTE[len(plan.items()) % len(PALETTE)]}"))
     return t
 
 
