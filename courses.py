@@ -347,7 +347,8 @@ def render_list(cat: Catalog, plan, assign) -> Table:
             s.sec if s else "-", s.crn if s else "-", (s.instructor or "-") if s else "-",
             meetings_str(s) if s else "-", "[b]pinned[/]" if pin else "",
         )
-        credits += int(s.credits or 0)
+        if (s.credits.isnumeric()):
+            credits += int(s.credits or 0)
 
     t.add_row(Text(pretty("Total Credit Hours: {}".format(credits)), 
                    style=f"bold {PALETTE[len(plan.items()) % len(PALETTE)]}"))
